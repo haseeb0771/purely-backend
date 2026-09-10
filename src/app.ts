@@ -39,7 +39,32 @@ app.use(
 
 app.use(
   cors({
-    origin: env.CLIENT_URL,
+    origin: (origin, callback) => {
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+
+      let host: string;
+      try {
+        host = new URL(origin).hostname;
+      } catch {
+        callback(new Error("Not allowed by CORS"));
+        return;
+      }
+
+      const allowed =
+        env.CLIENT_URL === origin ||
+        host === "localhost" ||
+        host.endsWith(".vercel.app");
+
+      if (allowed) {
+        callback(null, true);
+        return;
+      }
+
+      callback(new Error("Not allowed by CORS"));
+    },
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
