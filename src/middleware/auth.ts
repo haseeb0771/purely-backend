@@ -16,10 +16,9 @@ export async function protect(
 ): Promise<void> {
   try {
     const token =
-      (req.cookies?.token as string | undefined) ??
-      (req.headers.authorization?.startsWith("Bearer ")
-        ? req.headers.authorization.slice(7)
-        : undefined);
+      req.headers.authorization?.startsWith("Bearer ")
+        ? req.headers.authorization.split(" ")[1]
+        : req.cookies?.token;
 
     if (!token) {
       res.status(401).json({
