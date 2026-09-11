@@ -39,37 +39,13 @@ app.use(
 
 app.use(
   cors({
-    origin: (origin, callback) => {
-      if (!origin) {
-        callback(null, true);
-        return;
-      }
-
-      let host: string;
-      try {
-        host = new URL(origin).hostname;
-      } catch {
-        callback(new Error("Not allowed by CORS"));
-        return;
-      }
-
-      const allowed =
-        env.CLIENT_URL === origin ||
-        host === "localhost" ||
-        host.endsWith(".vercel.app");
-
-      if (allowed) {
-        callback(null, true);
-        return;
-      }
-
-      callback(new Error("Not allowed by CORS"));
-    },
+    origin: true,
     credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
   })
 );
+app.options("*", cors());
 
 app.use(cookieParser());
 app.use(express.json({ limit: "10kb" }));
