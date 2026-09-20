@@ -31,7 +31,7 @@ function resolveToken(handshake: {
 export function initSockets(httpServer: NodeHttpServer): SocketServer {
   io = new SocketServer(httpServer, {
     cors: {
-      origin: env.CLIENT_URL,
+      origin: true, // reflect any origin (LAN IP / mobile / laptop / deployed) — same policy as the HTTP layer
       credentials: true,
     },
   });
