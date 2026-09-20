@@ -151,3 +151,43 @@ export function emitInventoryNotification(opts: {
 
   emitToAdminsExcept(granularEvent, payload, opts.performerAdminId);
 }
+
+export function emitMarketingNotification(opts: {
+  type: "CREATE" | "UPDATE" | "DELETE";
+  module: string;
+  message: string;
+  performerAdminId: string;
+  data: unknown;
+}): void {
+  const timestamp = new Date().toISOString();
+  const itemId = extractItemId(opts.data);
+  const payload = {
+    type: opts.type,
+    module: opts.module,
+    message: opts.message,
+    timestamp,
+    itemId,
+    data: opts.data,
+  };
+
+  void persistNotification({
+    type: "marketing",
+    action: opts.type,
+    title: `Marketing ${opts.type.charAt(0) + opts.type.slice(1).toLowerCase()}`,
+    message: opts.message,
+    module: opts.module,
+    itemId: itemId ?? undefined,
+    href: itemId ? `/admin/marketing?open=${itemId}` : undefined,
+  });
+
+  emitToAdmins("marketing_notification", payload);
+
+  const granularEvent =
+    opts.type === "CREATE"
+      ? "marketing_client_created"
+      : opts.type === "UPDATE"
+      ? "marketing_client_updated"
+      : "marketing_client_deleted";
+
+  emitToAdminsExcept(granularEvent, payload, opts.performerAdminId);
+}

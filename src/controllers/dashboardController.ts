@@ -61,6 +61,8 @@ export async function getDashboardSummary(
       monthlyRows,
       monthlyOrderRows,
       recentLogs,
+      collectionsRows,
+      pendingCollectionsRows,
     ] = await Promise.all([
       getSettingValue<number>(BUDGET_KEY),
       Expense.aggregate([
@@ -98,6 +100,21 @@ export async function getDashboardSummary(
         { $sort: { "_id.year": 1, "_id.month": 1 } },
       ]),
       AuditLog.find().sort({ createdAt: -1 }).limit(RECENT_LOGS_LIMIT).lean(),
+      Order.aggregate([
+        { $match: { status: { $ne: "CANCELLED" } } },
+        { $group: { _id: null, total: { $sum: "$totalPaid" } } },
+      ]),
+      Order.aggregate([
+        {
+          $match: { status: { $ne: "CANCELLED" }, paymentStatus: { $ne: "PAID" } },
+        },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: { $subtract: ["$sellingPrice", "$totalPaid"] } },
+          },
+        },
+      ]),
     ]);
 
     const monthlyTotalMap = new Map<string, number>();
@@ -165,6 +182,8 @@ export async function getDashboardSummary(
         stockInvestment,
         otherExpenses: expenseTotal,
         profit,
+        collections: round2(collectionsRows[0]?.total ?? 0),
+        pendingCollections: round2(pendingCollectionsRows[0]?.total ?? 0),
         totalOrders,
         monthlyExpenses: months,
         monthlyOrders,

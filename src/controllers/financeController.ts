@@ -6,6 +6,7 @@ import { CapInventory } from "../models/CapInventory";
 import { LabelInventory } from "../models/LabelInventory";
 import { PetPackagingInventory } from "../models/PetPackagingInventory";
 import { Expense } from "../models/Expense";
+import { Order } from "../models/Order";
 import { getSettingValue, setSettingValue } from "../models/GlobalSetting";
 import { recordAudit } from "../services/audit";
 
@@ -34,7 +35,7 @@ export async function getFinanceSummary(
   res: Response
 ): Promise<void> {
   try {
-    const [budget, otherExpenses, bottleCost, capCost, labelCost, petCost, recentExpenses, byCategory] =
+    const [budget, otherExpenses, bottleCost, capCost, labelCost, petCost, recentExpenses, byCategory, collectionsRows, pendingCollectionsRows, pendingPayments] =
       await Promise.all([
         getSettingValue<number>(BUDGET_KEY),
         Expense.aggregate([
@@ -55,6 +56,29 @@ export async function getFinanceSummary(
           },
           { $sort: { total: -1 } },
         ]),
+        Order.aggregate([
+          { $match: { status: { $ne: "CANCELLED" } } },
+          { $group: { _id: null, total: { $sum: "$totalPaid" } } },
+        ]),
+        Order.aggregate([
+          {
+            $match: { status: { $ne: "CANCELLED" }, paymentStatus: { $ne: "PAID" } },
+          },
+          {
+            $group: {
+              _id: null,
+              total: { $sum: { $subtract: ["$sellingPrice", "$totalPaid"] } },
+            },
+          },
+        ]),
+        Order.find({
+          status: { $ne: "CANCELLED" },
+          paymentStatus: { $ne: "PAID" },
+        })
+          .sort({ sellingPrice: -1, createdAt: -1 })
+          .limit(10)
+          .select("orderId clientDetails.businessName sellingPrice totalPaid deliveredAt status")
+          .lean({ virtuals: true }),
       ]);
 
     const stockTotal = round2(bottleCost + capCost + labelCost + petCost);
@@ -71,6 +95,9 @@ export async function getFinanceSummary(
       date: e.date?.toISOString(),
     }));
 
+    const collections = round2(collectionsRows[0]?.total ?? 0);
+    const pendingCollections = round2(pendingCollectionsRows[0]?.total ?? 0);
+
     res.status(200).json({
       success: true,
       data: {
@@ -78,11 +105,24 @@ export async function getFinanceSummary(
         stockInvestment: stockTotal,
         otherExpenses: expenseTotal,
         profit,
+        collections,
+        pendingCollections,
         recentExpenses: data,
         byCategory: (byCategory ?? []).map((c) => ({
           category: c._id,
           total: round2(c.total ?? 0),
           count: c.count ?? 0,
+        })),
+        pendingPayments: (pendingPayments ?? []).map((o) => ({
+          orderId: o.orderId,
+          businessName: o.clientDetails?.businessName ?? "",
+          status: o.status,
+          totalBill: round2(o.sellingPrice ?? 0),
+          totalPaid: round2(o.totalPaid ?? 0),
+          pendingAmount: round2(
+            Math.max(0, round2(o.sellingPrice ?? 0) - round2(o.totalPaid ?? 0))
+          ),
+          deliveredAt: o.deliveredAt?.toISOString() ?? null,
         })),
       },
     });

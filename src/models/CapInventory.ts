@@ -14,6 +14,12 @@ export interface CapInventoryFields {
   imageUrl: string;
   totalQuantity: number;
   totalCostPrice: number;
+  /**
+   * Cost of a single cap, frozen at intake (total ÷ quantity at the time the
+   * batch was recorded). This is authoritative for order costing so the value
+   * never inflates as stock is consumed.
+   */
+  unitCostPrice: number;
   stockAlertLevel: number;
   createdBy: Types.ObjectId;
   updatedByHistory: CapUpdatedByEntry[];
@@ -22,7 +28,6 @@ export interface CapInventoryFields {
 export interface CapInventoryDoc extends CapInventoryFields, Document {
   createdAt: Date;
   updatedAt: Date;
-  unitCostPrice: number;
 }
 
 export function computeUnitCostPrice(
@@ -81,6 +86,12 @@ const capInventorySchema = new Schema<CapInventoryDoc>(
       min: [0, "Total cost price cannot be negative."],
       default: 0,
     },
+    unitCostPrice: {
+      type: Number,
+      required: true,
+      min: [0, "Unit cost price cannot be negative."],
+      default: 0,
+    },
     stockAlertLevel: {
       type: Number,
       min: [0, "Stock alert level cannot be negative."],
@@ -101,11 +112,6 @@ const capInventorySchema = new Schema<CapInventoryDoc>(
     timestamps: true,
   }
 );
-
-capInventorySchema.virtual("unitCostPrice").get(function () {
-  if (!Number.isFinite(this.totalCostPrice) || this.totalQuantity <= 0) return 0;
-  return this.totalCostPrice / this.totalQuantity;
-});
 
 capInventorySchema.set("toJSON", { virtuals: true });
 capInventorySchema.set("toObject", { virtuals: true });

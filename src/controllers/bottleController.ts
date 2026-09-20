@@ -5,6 +5,7 @@ import type { AuthRequest } from "../middleware/auth";
 import { emitInventoryNotification } from "../sockets";
 import { recordAudit } from "../services/audit";
 import { checkAndNotifyStockAlerts } from "../services/stockAlerts";
+import { resolvePerPiece, weightedPerPiece } from "../utils/pricing";
 
 const RSD_ID_PATTERN = /^RSD-\d{3}$/;
 
@@ -516,12 +517,15 @@ export async function addBottleInventory(
     for (const add of addedDetails) {
       const found = current.find((s) => s.size === add.size);
       if (found) {
+        const nextUnitCost = weightedPerPiece(
+          found.quantity,
+          resolvePerPiece(found.unitCostPrice, found.totalCostPrice, found.quantity),
+          add.quantity,
+          add.totalCostPrice
+        );
         found.quantity += add.quantity;
         found.totalCostPrice += add.totalCostPrice;
-        found.unitCostPrice =
-          found.quantity > 0
-            ? Math.round((found.totalCostPrice / found.quantity) * 100) / 100
-            : 0;
+        found.unitCostPrice = nextUnitCost;
         if (add.stockAlertLevel > 0) {
           found.stockAlertLevel = add.stockAlertLevel;
         }
