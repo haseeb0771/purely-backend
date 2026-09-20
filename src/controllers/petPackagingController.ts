@@ -1,14 +1,55 @@
 import type { Response } from "express";
 import { PetPackagingInventory } from "../models/PetPackagingInventory";
+import {
+  PET_PACKAGING_SIZES,
+  computeSizeRollups,
+  computeWeightedUnitCost,
+  type PetPackagingSizeDetail,
+} from "../models/PetPackagingInventory";
 import type { AuthRequest } from "../middleware/auth";
 import { recordAudit } from "../services/audit";
 import { emitInventoryNotification } from "../sockets";
 import { checkAndNotifyStockAlerts } from "../services/stockAlerts";
+import { resolvePerPiece, weightedPerPiece } from "../utils/pricing";
+
+interface SanitizedPetPackagingSizeDetail {
+  size: string;
+  quantity: number;
+  totalCostPrice: number;
+  unitCostPrice: number;
+  stockAlertLevel: number;
+}
 
 function sanitizeNonNegative(value: unknown, fallback = 0): number {
   if (value === undefined || value === null) return fallback;
   const num = Number(value);
   return Number.isFinite(num) && num >= 0 ? num : fallback;
+}
+
+function sanitizeSizeDetails(raw: unknown): SanitizedPetPackagingSizeDetail[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((entry): entry is Record<string, unknown> => {
+      return (
+        typeof entry === "object" &&
+        entry !== null &&
+        typeof (entry as Record<string, unknown>).size === "string"
+      );
+    })
+    .map((entry) => {
+      const size = entry.size as string;
+      const quantity = sanitizeNonNegative(entry.quantity);
+      const totalCostPrice = sanitizeNonNegative(entry.totalCostPrice);
+      const stockAlertLevel = sanitizeNonNegative(entry.stockAlertLevel);
+      const unitCostPrice =
+        quantity > 0
+          ? Math.round((totalCostPrice / quantity) * 100) / 100
+          : 0;
+      return { size, quantity, totalCostPrice, unitCostPrice, stockAlertLevel };
+    })
+    .filter((entry) =>
+      (PET_PACKAGING_SIZES as readonly string[]).includes(entry.size)
+    );
 }
 
 function buildPetPackagingNotificationMessage(
@@ -39,8 +80,25 @@ async function generateUniqueCustomId(): Promise<string> {
   throw new Error("Could not generate a unique custom ID.");
 }
 
-function summarizeCreate(size: string, quantity: number): string {
-  return `Created pet packaging (${size}) with ${quantity} pcs.`;
+function summarizeSizeDetails(
+  details: Array<{ size: string; quantity: number; totalCostPrice: number }>
+): string {
+  if (details.length === 0) return "No stock details.";
+  const parts = details.map(
+    (d) =>
+      `${d.size}: ${d.quantity} pcs, Rs. ${d.totalCostPrice.toLocaleString()}`
+  );
+  return parts.join("; ");
+}
+
+function summarizeCreate(
+  detailsOrSize: Array<{ size: string; quantity: number; totalCostPrice: number }> | string,
+  quantity?: number
+): string {
+  if (Array.isArray(detailsOrSize)) {
+    return `Created pet packaging with details — ${summarizeSizeDetails(detailsOrSize)}.`;
+  }
+  return `Created pet packaging (${detailsOrSize}) with ${quantity ?? 0} pcs.`;
 }
 
 function summarizeUpdate(
@@ -51,6 +109,19 @@ function summarizeUpdate(
     return `Updated quantity from ${prevQuantity} to ${nextQuantity}`;
   }
   return "No changes were made.";
+}
+
+function summarizeAddInventory(
+  details: SanitizedPetPackagingSizeDetail[]
+): string {
+  if (details.length === 0) {
+    return "No stock was added.";
+  }
+  const parts = details.map(
+    (d) =>
+      `${d.size}: +${d.quantity} qty, +Rs. ${d.totalCostPrice.toLocaleString()}`
+  );
+  return `Added inventory — ${parts.join("; ")}.`;
 }
 
 export async function listPetPackaging(
@@ -121,6 +192,7 @@ export async function createPetPackaging(
       return;
     }
 
+    const sizeDetails = sanitizeSizeDetails(req.body?.sizeDetails);
     const size = (req.body?.size || "").trim();
     const quantity = req.body?.quantity
       ? Number(req.body.quantity)
@@ -130,26 +202,43 @@ export async function createPetPackaging(
       : 0;
     const stockAlertLevel = sanitizeNonNegative(req.body?.stockAlertLevel);
 
-    if (!size) {
+    if (!size && sizeDetails.length === 0) {
       res.status(400).json({ success: false, message: "Size is required." });
       return;
     }
 
     const customId = await generateUniqueCustomId();
 
+    const rollups =
+      sizeDetails.length > 0
+        ? computeSizeRollups(sizeDetails)
+        : { size, quantity, totalCostPrice };
+
+    const unitCostPrice =
+      sizeDetails.length > 0
+        ? computeWeightedUnitCost(sizeDetails)
+        : rollups.quantity > 0
+          ? Math.round((rollups.totalCostPrice / rollups.quantity) * 100) / 100
+          : 0;
+
     const petPackaging = await PetPackagingInventory.create({
       customId,
-      size,
-      quantity,
-      totalCostPrice,
+      size: rollups.size,
+      quantity: rollups.quantity,
+      totalCostPrice: rollups.totalCostPrice,
+      unitCostPrice,
       stockAlertLevel,
+      sizeDetails,
       createdBy: req.admin._id,
       updatedByHistory: [
         {
           adminId: req.admin._id,
           adminName: req.admin.name,
           updatedAt: new Date(),
-          changesSummary: summarizeCreate(size, quantity),
+          changesSummary:
+            sizeDetails.length > 0
+              ? summarizeCreate(sizeDetails)
+              : summarizeCreate(size, quantity),
         },
       ],
     });
@@ -212,6 +301,7 @@ export async function updatePetPackaging(
       return;
     }
 
+    const sizeDetailsRaw = req.body?.sizeDetails;
     const size = (req.body?.size || "").trim();
     const quantity = req.body?.quantity !== undefined ? Number(req.body.quantity) : existing.quantity;
     const totalCostPrice = req.body?.totalCostPrice !== undefined ? Number(req.body.totalCostPrice) : existing.totalCostPrice;
@@ -220,28 +310,73 @@ export async function updatePetPackaging(
         ? sanitizeNonNegative(req.body.stockAlertLevel, existing.stockAlertLevel)
         : undefined;
 
-    if (!size) {
-      res.status(400).json({ success: false, message: "Size is required." });
-      return;
+    const updates: Record<string, unknown> = {};
+    let rollupSize = size;
+    let rollupQuantity = quantity;
+    let rollupCost = totalCostPrice;
+
+    if (Array.isArray(sizeDetailsRaw)) {
+      const sizeDetails = sanitizeSizeDetails(sizeDetailsRaw);
+      if (sizeDetails.length > 0) {
+        const rollups = computeSizeRollups(sizeDetails);
+        rollupSize = rollups.size;
+        rollupQuantity = rollups.quantity;
+        rollupCost = rollups.totalCostPrice;
+      }
+      if (!rollupSize && sizeDetails.length === 0) {
+        res.status(400).json({ success: false, message: "Size is required." });
+        return;
+      }
+      updates.sizeDetails = sizeDetails;
+      updates.size = rollupSize;
+      updates.quantity = rollupQuantity;
+      updates.totalCostPrice = rollupCost;
+      updates.unitCostPrice = computeWeightedUnitCost(sizeDetails);
+    } else {
+      if (!rollupSize) {
+        res.status(400).json({ success: false, message: "Size is required." });
+        return;
+      }
+      // Migrate a legacy flat record into sizeDetails so the web UI can pick
+      // it up even after the mobile app edits it.
+      if (existing.sizeDetails.length === 0 && rollupSize) {
+        updates.sizeDetails = [
+          {
+            size: rollupSize,
+            quantity: rollupQuantity,
+            totalCostPrice: rollupCost,
+            unitCostPrice:
+              rollupQuantity > 0
+                ? Math.round((rollupCost / rollupQuantity) * 100) / 100
+                : 0,
+            stockAlertLevel:
+              stockAlertLevel !== undefined
+                ? stockAlertLevel
+                : existing.stockAlertLevel ?? 0,
+          },
+        ];
+      }
+      updates.size = rollupSize;
+      updates.quantity = rollupQuantity;
+      updates.totalCostPrice = rollupCost;
+      updates.unitCostPrice =
+        rollupQuantity > 0
+          ? Math.round((rollupCost / rollupQuantity) * 100) / 100
+          : existing.unitCostPrice;
     }
 
-    const nextQuantity = quantity;
-    const changesSummary = summarizeUpdate(existing.quantity, nextQuantity);
+    if (stockAlertLevel !== undefined) updates.stockAlertLevel = stockAlertLevel;
 
-    const updates: Record<string, unknown> = {
-      size,
-      quantity,
-      totalCostPrice,
-      $push: {
-        updatedByHistory: {
-          adminId: req.admin?._id,
-          adminName: req.admin?.name,
-          updatedAt: new Date(),
-          changesSummary,
-        },
+    const changesSummary = summarizeUpdate(existing.quantity, rollupQuantity);
+
+    updates.$push = {
+      updatedByHistory: {
+        adminId: req.admin?._id,
+        adminName: req.admin?.name,
+        updatedAt: new Date(),
+        changesSummary,
       },
     };
-    if (stockAlertLevel !== undefined) updates.stockAlertLevel = stockAlertLevel;
 
     const updated = await PetPackagingInventory.findByIdAndUpdate(
       req.params.id,
@@ -257,7 +392,7 @@ export async function updatePetPackaging(
       action: "UPDATE" as const,
       targetModule: "pet-packaging",
       previous: { quantity: existing.quantity },
-      next: { quantity: nextQuantity },
+      next: { quantity: rollupQuantity },
     });
 
     emitInventoryNotification({
@@ -266,14 +401,14 @@ export async function updatePetPackaging(
       message: buildPetPackagingNotificationMessage(
         req.admin?.name ?? "An admin",
         "UPDATE",
-        size,
-        nextQuantity
+        rollupSize,
+        rollupQuantity
       ),
       performerAdminId: String(req.admin?._id),
       data: {
         id: req.params.id,
-        size,
-        quantity: nextQuantity,
+        size: rollupSize,
+        quantity: rollupQuantity,
       },
     });
 
@@ -306,6 +441,119 @@ export async function addPetPackagingInventory(
     }
 
     const adminName = req.admin.name;
+    const addedDetails = sanitizeSizeDetails(req.body?.sizeDetails).filter(
+      (d) => d.quantity > 0
+    );
+
+    let changesSummary: string;
+
+    if (addedDetails.length > 0) {
+      // Web flow: merge additions into sizeDetails (dedupe + self-heal), then
+      // keep the flat fields in sync as rollups for backward compatibility.
+      const current: PetPackagingSizeDetail[] = [];
+      for (const s of existing.sizeDetails ?? []) {
+        const found = current.find((e) => e.size === s.size);
+        if (found) {
+          found.quantity += s.quantity;
+          found.totalCostPrice += s.totalCostPrice;
+        } else {
+          current.push({
+            size: s.size,
+            quantity: s.quantity,
+            totalCostPrice: s.totalCostPrice,
+            unitCostPrice: s.unitCostPrice,
+            stockAlertLevel: s.stockAlertLevel ?? 0,
+          });
+        }
+      }
+
+      for (const add of addedDetails) {
+        const found = current.find((s) => s.size === add.size);
+        if (found) {
+          const nextUnitCost = weightedPerPiece(
+            found.quantity,
+            resolvePerPiece(found.unitCostPrice, found.totalCostPrice, found.quantity),
+            add.quantity,
+            add.totalCostPrice
+          );
+          found.quantity += add.quantity;
+          found.totalCostPrice += add.totalCostPrice;
+          found.unitCostPrice = nextUnitCost;
+          if (add.stockAlertLevel > 0) {
+            found.stockAlertLevel = add.stockAlertLevel;
+          }
+        } else {
+          current.push({ ...(add as PetPackagingSizeDetail) });
+        }
+      }
+
+      const rollups = computeSizeRollups(current);
+
+      const requestedAlert =
+        req.body?.stockAlertLevel !== undefined
+          ? sanitizeNonNegative(req.body.stockAlertLevel)
+          : undefined;
+      changesSummary = summarizeAddInventory(addedDetails);
+      if (requestedAlert !== undefined && requestedAlert > 0) {
+        changesSummary += ` Alert level set to ${requestedAlert}.`;
+      }
+
+      const updates: Record<string, unknown> = {
+        sizeDetails: current,
+        size: rollups.size,
+        quantity: rollups.quantity,
+        totalCostPrice: rollups.totalCostPrice,
+        unitCostPrice: computeWeightedUnitCost(current),
+        $push: {
+          updatedByHistory: {
+            adminId: req.admin._id,
+            adminName,
+            updatedAt: new Date(),
+            changesSummary,
+          },
+        },
+      };
+      if (requestedAlert !== undefined && requestedAlert > 0) {
+        updates.stockAlertLevel = requestedAlert;
+      }
+
+      const updated = await PetPackagingInventory.findByIdAndUpdate(
+        req.params.id,
+        updates,
+        { new: true, runValidators: true }
+      )
+        .populate("createdBy", "name email")
+        .populate("updatedByHistory.adminId", "name email")
+        .lean({ virtuals: true });
+
+      await recordAudit({
+        req,
+        action: "UPDATE" as const,
+        targetModule: "pet-packaging",
+        previous: { quantity: existing.quantity },
+        next: { quantity: rollups.quantity },
+      });
+
+      emitInventoryNotification({
+        type: "UPDATE",
+        module: "pet-packaging",
+        message: buildPetPackagingNotificationMessage(
+          adminName,
+          "UPDATE",
+          rollups.size,
+          rollups.quantity
+        ),
+        performerAdminId: String(req.admin._id),
+        data: { id: req.params.id, size: rollups.size, quantity: rollups.quantity },
+      });
+
+      void checkAndNotifyStockAlerts();
+
+      res.status(200).json({ success: true, data: updated });
+      return;
+    }
+
+    // Legacy mobile flow: flat quantity/totalCostPrice additions.
     const quantity = sanitizeNonNegative(req.body?.quantity);
     const totalCostPrice = sanitizeNonNegative(req.body?.totalCostPrice);
 
@@ -322,17 +570,28 @@ export async function addPetPackagingInventory(
         ? sanitizeNonNegative(req.body.stockAlertLevel)
         : undefined;
 
-    let changesSummary = `Added inventory — +${quantity} pcs, +Rs. ${totalCostPrice.toLocaleString()}.`;
+    changesSummary = `Added inventory — +${quantity} pcs, +Rs. ${totalCostPrice.toLocaleString()}.`;
     if (requestedAlert !== undefined && requestedAlert > 0) {
       changesSummary += ` Alert level set to ${requestedAlert}.`;
     }
 
     const nextQuantity = existing.quantity + quantity;
     const nextCost = existing.totalCostPrice + totalCostPrice;
+    const nextUnitCostPrice = weightedPerPiece(
+      existing.quantity,
+      resolvePerPiece(
+        existing.unitCostPrice,
+        existing.totalCostPrice,
+        existing.quantity
+      ),
+      quantity,
+      totalCostPrice
+    );
 
     const updates: Record<string, unknown> = {
       quantity: nextQuantity,
       totalCostPrice: nextCost,
+      unitCostPrice: nextUnitCostPrice,
       $push: {
         updatedByHistory: {
           adminId: req.admin._id,
@@ -344,6 +603,33 @@ export async function addPetPackagingInventory(
     };
     if (requestedAlert !== undefined && requestedAlert > 0) {
       updates.stockAlertLevel = requestedAlert;
+    }
+
+    // Keep the sizeDetails array consistent with the flat add so the web UI
+    // stays accurate even after mobile-only additions.
+    const current = (existing.sizeDetails ?? []).map((s) => ({
+      size: s.size,
+      quantity: s.quantity,
+      totalCostPrice: s.totalCostPrice,
+      unitCostPrice: s.unitCostPrice,
+      stockAlertLevel: s.stockAlertLevel ?? 0,
+    }));
+    const matchedSize = existing.size;
+    const found = current.find((s) => s.size === matchedSize);
+    if (found) {
+      const nextDetailUnit = weightedPerPiece(
+        found.quantity,
+        resolvePerPiece(found.unitCostPrice, found.totalCostPrice, found.quantity),
+        quantity,
+        totalCostPrice
+      );
+      found.quantity += quantity;
+      found.totalCostPrice += totalCostPrice;
+      found.unitCostPrice = nextDetailUnit;
+      if (requestedAlert !== undefined && requestedAlert > 0) {
+        found.stockAlertLevel = requestedAlert;
+      }
+      updates.sizeDetails = current;
     }
 
     const updated = await PetPackagingInventory.findByIdAndUpdate(

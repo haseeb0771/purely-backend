@@ -8,14 +8,31 @@ const MAX_PAGE_SIZE = 100;
 const PAGE_SIZE = 20;
 
 export async function listExpenseCategories(
-  _req: AuthRequest,
+  req: AuthRequest,
   res: Response
 ): Promise<void> {
   try {
-    const categories = await ExpenseCategory.find()
-      .sort({ name: 1 })
-      .lean();
-    res.status(200).json({ success: true, data: categories });
+    const rawPage = req.query.page;
+    const rawLimit = req.query.limit;
+    const hasPagination = rawPage !== undefined || rawLimit !== undefined;
+    const page = Math.max(1, Number(rawPage) || 1);
+    const limit = Math.min(100, Math.max(1, Number(rawLimit) || 20));
+
+    const query = ExpenseCategory.find().sort({ name: 1 }).lean();
+    if (hasPagination) {
+      query.skip((page - 1) * limit).limit(limit);
+    }
+    const categories = await query;
+
+    const total = hasPagination
+      ? await ExpenseCategory.countDocuments()
+      : categories.length;
+
+    res.status(200).json({
+      success: true,
+      data: categories,
+      ...(hasPagination ? { hasMore: page * limit < total } : {}),
+    });
   } catch (error) {
     console.error("[expenses] list categories failed:", error);
     res.status(500).json({

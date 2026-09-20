@@ -5,6 +5,7 @@ import type { AuthRequest } from "../middleware/auth";
 import { recordAudit } from "../services/audit";
 import { emitInventoryNotification } from "../sockets";
 import { checkAndNotifyStockAlerts } from "../services/stockAlerts";
+import { resolvePerPiece, weightedPerPiece } from "../utils/pricing";
 
 interface SanitizedLabelSizeDetail {
   size: string;
@@ -154,10 +155,17 @@ export async function createLabel(
     }
 
     const name = (req.body?.name || "").trim();
-    const sizeDetails = req.body?.sizeDetails || [];
+    const sizeDetails = sanitizeSizeDetails(req.body?.sizeDetails);
 
     if (!name) {
       res.status(400).json({ success: false, message: "Name is required." });
+      return;
+    }
+    if (sizeDetails.length === 0) {
+      res.status(400).json({
+        success: false,
+        message: "At least one size with a quantity is required.",
+      });
       return;
     }
 
@@ -226,7 +234,7 @@ export async function updateLabel(
 
     const name = (req.body?.name || "").trim();
     const sizeDetails = req.body?.sizeDetails
-      ? req.body?.sizeDetails
+      ? sanitizeSizeDetails(req.body.sizeDetails)
       : (existing.sizeDetails ?? []).map((d) => ({
           size: d.size,
           quantity: d.quantity,
@@ -335,12 +343,15 @@ export async function addLabelInventory(
     for (const add of addedDetails) {
       const found = current.find((s) => s.size === add.size);
       if (found) {
+        const nextUnitCost = weightedPerPiece(
+          found.quantity,
+          resolvePerPiece(found.unitCostPrice, found.totalCostPrice, found.quantity),
+          add.quantity,
+          add.totalCostPrice
+        );
         found.quantity += add.quantity;
         found.totalCostPrice += add.totalCostPrice;
-        found.unitCostPrice =
-          found.quantity > 0
-            ? Math.round((found.totalCostPrice / found.quantity) * 100) / 100
-            : 0;
+        found.unitCostPrice = nextUnitCost;
         if (add.stockAlertLevel > 0) {
           found.stockAlertLevel = add.stockAlertLevel;
         }

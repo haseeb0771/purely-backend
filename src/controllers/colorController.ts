@@ -3,15 +3,29 @@ import { Color } from "../models/Color";
 import type { AuthRequest } from "../middleware/auth";
 
 export async function listColors(
-  _req: AuthRequest,
+  req: AuthRequest,
   res: Response
 ): Promise<void> {
   try {
-    const colors = await Color.find()
-      .sort({ name: 1 })
-      .lean();
+    const rawPage = req.query.page;
+    const rawLimit = req.query.limit;
+    const hasPagination = rawPage !== undefined || rawLimit !== undefined;
+    const page = Math.max(1, Number(rawPage) || 1);
+    const limit = Math.min(100, Math.max(1, Number(rawLimit) || 20));
 
-    res.status(200).json({ success: true, data: colors });
+    const query = Color.find().sort({ name: 1 }).lean();
+    if (hasPagination) {
+      query.skip((page - 1) * limit).limit(limit);
+    }
+    const colors = await query;
+
+    const total = hasPagination ? await Color.countDocuments() : colors.length;
+
+    res.status(200).json({
+      success: true,
+      data: colors,
+      ...(hasPagination ? { hasMore: page * limit < total } : {}),
+    });
   } catch (error) {
     console.error("[colors] list failed:", error);
     res.status(500).json({

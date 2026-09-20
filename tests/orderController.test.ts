@@ -264,6 +264,30 @@ describe("parseOrderPayload", () => {
       }),
     ).toThrow("Upload a logo image for the new label design.");
   });
+
+  it("parses and sanitizes per-size sell prices", () => {
+    const petId = new mongoose.Types.ObjectId().toString();
+    const payload = parseOrderPayload({
+      clientDetails: baseClient,
+      bottleSelection: {
+        ...baseBottle(),
+        sizes: ["500ml", "19L"],
+        sizeQuantities: [
+          { size: "500ml", quantity: 1 },
+          { size: "19L", quantity: 1 },
+        ],
+      },
+      ...baseRest(),
+      petPackagingSelection: [{ petPackagingId: petId, size: "500ml", quantity: 1 }],
+      priceBreakdown: {
+        bottleSellPerUnit: { "500ml": 70, "1500ml": 25, junk: -5 },
+        petSellPerUnit: { [petId]: 12, nope: "abc" },
+      },
+    });
+
+    expect(payload.bottleSellPerUnit).toEqual({ "500ml": 70 });
+    expect(payload.petSellPerUnit).toEqual({ [petId]: 12 });
+  });
 });
 
 describe("createOrder", () => {
@@ -276,12 +300,17 @@ describe("createOrder", () => {
 
     expect(res.statusCode).toBe(201);
     expect((res.body as { success: boolean }).success).toBe(true);
+    expect((res.body as { warnings: string[] }).warnings).toEqual([]);
 
     const order = await Order.findOne({
       "clientDetails.businessName": "Acme Water",
     });
     expect(order).not.toBeNull();
     expect(order!.orderId).toMatch(/^ORD-\d{8}-\d{5}$/);
+    // Legacy order (no per-size sell prices): cost includes water (2.5/L).
+    // liters = 10×0.5 + 5×19 = 100 → water = Rs 250.
+    expect(order!.totalCost).toBe(1680);
+    expect(order!.priceBreakdown).toBeNull();
 
     const bottle = await BottleInventory.findById(seed.bottle._id);
     expect(bottle!.sizeDetails.find((s) => s.size === "500ml")!.quantity).toBe(
@@ -302,6 +331,62 @@ describe("createOrder", () => {
 
     const pet = await PetPackagingInventory.findById(seed.pet._id);
     expect(pet!.quantity).toBe(195);
+  });
+
+  it("stores per-size price breakdown and includes water in totals", async () => {
+    const seed = await seedInventory();
+    const body = validBody(seed);
+    (body as Record<string, unknown>).priceBreakdown = {
+      bottleSellPerUnit: { "500ml": 70, "19L": 140 },
+      petSellPerUnit: { [String(seed.pet._id)]: 12 },
+    };
+    const res = makeRes();
+    await createOrder(makeReq(seed.admin._id, body), res as never);
+
+    expect(res.statusCode).toBe(201);
+    const order = await Order.findOne({
+      "clientDetails.businessName": "Acme Water",
+    });
+    expect(order).not.toBeNull();
+
+    // sells: 70×10 + 140×5 + 12×5 = 1460
+    expect(order!.sellingPrice).toBe(1460);
+    // costs: bottles 1000 + caps 30 + labels 350 + pet 50 = 1430 + water 250
+    expect(order!.totalCost).toBe(1680);
+    expect(order!.profit).toBe(-220);
+
+    const pb = order!.priceBreakdown;
+    expect(pb).not.toBeNull();
+    expect(pb!.bottleLines).toHaveLength(2);
+    const line500 = pb!.bottleLines.find((l) => l.size === "500ml")!;
+    expect(line500.costPerUnit).toBe(72); // bottle 50 + cap 2 + label 20
+    expect(line500.sellPerUnit).toBe(70);
+    expect(line500.costAmount).toBe(720);
+    expect(line500.sellAmount).toBe(700);
+    expect(pb!.petLines).toHaveLength(1);
+    expect(pb!.petLines[0].sellPerUnit).toBe(12);
+    expect(pb!.petLines[0].sellAmount).toBe(60);
+    expect(pb!.water).toEqual({ liters: 100, rate: 2.5, amount: 250 });
+    expect(pb!.totals).toEqual({ cost: 1680, sell: 1460, profit: -220 });
+  });
+
+  it("recomputes sellingPrice from per-size lines even when priceMode is TOTAL", async () => {
+    const seed = await seedInventory();
+    const body = validBody(seed);
+    (body as Record<string, unknown>).priceMode = "TOTAL";
+    (body as Record<string, unknown>).sellingPrice = 99999;
+    (body as Record<string, unknown>).priceBreakdown = {
+      bottleSellPerUnit: { "500ml": 100, "19L": 200 },
+      petSellPerUnit: {},
+    };
+    const res = makeRes();
+    await createOrder(makeReq(seed.admin._id, body), res as never);
+
+    expect(res.statusCode).toBe(201);
+    const order = await Order.findOne({
+      "clientDetails.businessName": "Acme Water",
+    });
+    expect(order!.sellingPrice).toBe(2050); // 100×10 + 200×5 + 10×5 (pet at cost)
   });
 
   it("rolls back all stock when Order.create fails", async () => {
@@ -333,7 +418,7 @@ describe("createOrder", () => {
     expect(await Order.countDocuments()).toBe(0);
   });
 
-  it("returns 400 for insufficient bottle stock", async () => {
+  it("creates order with a warning for insufficient bottle stock", async () => {
     const seed = await seedInventory();
     const body = validBody(seed);
     (body.bottleSelection.sizeQuantities[0] as { quantity: number }).quantity =
@@ -341,27 +426,29 @@ describe("createOrder", () => {
     const res = makeRes();
     await createOrder(makeReq(seed.admin._id, body), res as never);
 
-    expect(res.statusCode).toBe(400);
-    expect((res.body as { message: string }).message).toContain(
-      "Insufficient 500ml bottle stock",
-    );
-    expect(await Order.countDocuments()).toBe(0);
+    expect(res.statusCode).toBe(201);
+    const warnings = (res.body as { warnings: string[] }).warnings;
+    expect(warnings.join("\n")).toContain("Insufficient 500ml bottle stock");
+    expect(await Order.countDocuments()).toBe(1);
+    const bottle = await BottleInventory.findById(seed.bottle._id);
+    expect(bottle!.sizeDetails.find((s) => s.size === "500ml")!.quantity).toBe(0);
   });
 
-  it("returns 400 for insufficient cap stock", async () => {
+  it("creates order with a warning for insufficient cap stock", async () => {
     const seed = await seedInventory();
     await CapInventory.updateOne({ _id: seed.cap._id }, { totalQuantity: 5 });
     const res = makeRes();
     await createOrder(makeReq(seed.admin._id, validBody(seed)), res as never);
 
-    expect(res.statusCode).toBe(400);
-    expect((res.body as { message: string }).message).toContain(
-      "Insufficient cap stock",
-    );
-    expect(await Order.countDocuments()).toBe(0);
+    expect(res.statusCode).toBe(201);
+    const warnings = (res.body as { warnings: string[] }).warnings;
+    expect(warnings.join("\n")).toContain("Insufficient cap stock");
+    expect(await Order.countDocuments()).toBe(1);
+    const cap = await CapInventory.findById(seed.cap._id);
+    expect(cap!.totalQuantity).toBe(0);
   });
 
-  it("returns 400 for insufficient label stock", async () => {
+  it("creates order with a warning for insufficient label stock", async () => {
     const seed = await seedInventory();
     await LabelInventory.updateOne(
       { _id: seed.label._id },
@@ -370,11 +457,12 @@ describe("createOrder", () => {
     const res = makeRes();
     await createOrder(makeReq(seed.admin._id, validBody(seed)), res as never);
 
-    expect(res.statusCode).toBe(400);
-    expect((res.body as { message: string }).message).toContain(
-      "Insufficient 500ml label stock",
-    );
-    expect(await Order.countDocuments()).toBe(0);
+    expect(res.statusCode).toBe(201);
+    const warnings = (res.body as { warnings: string[] }).warnings;
+    expect(warnings.join("\n")).toContain("Insufficient 500ml label stock");
+    expect(await Order.countDocuments()).toBe(1);
+    const label = await LabelInventory.findById(seed.label._id);
+    expect(label!.sizeDetails.find((s) => s.size === "500ml")!.quantity).toBe(0);
   });
 
   it("returns 400 for a size the bottle does not carry", async () => {
@@ -428,12 +516,13 @@ describe("createOrder", () => {
     expect(await Order.countDocuments()).toBe(0);
   });
 
-  it("checkOrderStock throws for quantities beyond stock", async () => {
+  it("checkOrderStock returns warnings for quantities beyond stock", async () => {
     const seed = await seedInventory();
     const payload = parseOrderPayload(validBody(seed));
     payload.sizeQuantities[0].quantity = 99999;
-    await expect(checkOrderStock(payload)).rejects.toThrow(
-      /Insufficient 500ml bottle stock/,
+    const result = await checkOrderStock(payload);
+    expect(result.warnings.join("\n")).toContain(
+      "Insufficient 500ml bottle stock",
     );
   });
 });

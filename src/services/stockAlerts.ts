@@ -36,8 +36,10 @@ export async function collectStockAlerts(): Promise<StockAlertItem[]> {
 
   for (const bottle of bottles) {
     for (const sd of bottle.sizeDetails ?? []) {
-      const alertLevel = sd.stockAlertLevel ?? 0;
-      if (alertLevel > 0 && (sd.quantity || 0) < alertLevel) {
+      const configuredLevel = sd.stockAlertLevel ?? 0;
+      const stock = sd.quantity || 0;
+      const effectiveLevel = configuredLevel > 0 ? configuredLevel : stock <= 0 ? 1 : 0;
+      if (effectiveLevel > 0 && stock < effectiveLevel) {
         alerts.push({
           itemId: String(bottle._id),
           module: "bottles",
@@ -45,8 +47,8 @@ export async function collectStockAlerts(): Promise<StockAlertItem[]> {
           name: bottle.bottleName,
           imageUrl: bottle.imageUrl,
           size: sd.size,
-          quantity: sd.quantity || 0,
-          stockAlertLevel: alertLevel,
+          quantity: stock,
+          stockAlertLevel: effectiveLevel,
           href: `/admin/inventory/bottles?open=${String(bottle._id)}`,
         });
       }
@@ -54,15 +56,18 @@ export async function collectStockAlerts(): Promise<StockAlertItem[]> {
   }
 
   for (const cap of caps) {
-    if (cap.stockAlertLevel > 0 && cap.totalQuantity < cap.stockAlertLevel) {
+    const configuredLevel = cap.stockAlertLevel ?? 0;
+    const stock = cap.totalQuantity ?? 0;
+    const effectiveLevel = configuredLevel > 0 ? configuredLevel : stock <= 0 ? 1 : 0;
+    if (effectiveLevel > 0 && stock < effectiveLevel) {
       alerts.push({
         itemId: String(cap._id),
         module: "caps",
         customId: cap.customId,
         name: cap.color,
         imageUrl: cap.imageUrl,
-        quantity: cap.totalQuantity,
-        stockAlertLevel: cap.stockAlertLevel,
+        quantity: stock,
+        stockAlertLevel: effectiveLevel,
         href: `/admin/inventory/caps?open=${String(cap._id)}`,
       });
     }
@@ -70,8 +75,10 @@ export async function collectStockAlerts(): Promise<StockAlertItem[]> {
 
   for (const label of labels) {
     for (const sd of label.sizeDetails ?? []) {
-      const alertLevel = sd.stockAlertLevel ?? 0;
-      if (alertLevel > 0 && (sd.quantity || 0) < alertLevel) {
+      const configuredLevel = sd.stockAlertLevel ?? 0;
+      const stock = sd.quantity || 0;
+      const effectiveLevel = configuredLevel > 0 ? configuredLevel : stock <= 0 ? 1 : 0;
+      if (effectiveLevel > 0 && stock < effectiveLevel) {
         alerts.push({
           itemId: String(label._id),
           module: "labels",
@@ -79,8 +86,8 @@ export async function collectStockAlerts(): Promise<StockAlertItem[]> {
           name: label.name,
           imageUrl: label.imageUrl,
           size: sd.size,
-          quantity: sd.quantity || 0,
-          stockAlertLevel: alertLevel,
+          quantity: stock,
+          stockAlertLevel: effectiveLevel,
           href: `/admin/inventory/labels?open=${String(label._id)}`,
         });
       }
@@ -88,16 +95,44 @@ export async function collectStockAlerts(): Promise<StockAlertItem[]> {
   }
 
   for (const pet of pets) {
-    if (pet.stockAlertLevel > 0 && pet.quantity < pet.stockAlertLevel) {
-      alerts.push({
-        itemId: String(pet._id),
-        module: "pet-packaging",
-        customId: pet.customId,
-        name: pet.size,
-        quantity: pet.quantity,
-        stockAlertLevel: pet.stockAlertLevel,
-        href: `/admin/inventory/pet-packaging?open=${String(pet._id)}`,
-      });
+    // Multi-size records (added from the web app) alert per size; legacy
+    // flat records fall back to their top-level size/quantity.
+    const details = pet.sizeDetails ?? [];
+    if (details.length > 0) {
+      for (const sd of details) {
+        const configuredLevel = sd.stockAlertLevel ?? 0;
+        const stock = sd.quantity || 0;
+        const effectiveLevel =
+          configuredLevel > 0 ? configuredLevel : stock <= 0 ? 1 : 0;
+        if (effectiveLevel > 0 && stock < effectiveLevel) {
+          alerts.push({
+            itemId: String(pet._id),
+            module: "pet-packaging",
+            customId: pet.customId,
+            name: pet.size,
+            size: sd.size,
+            quantity: stock,
+            stockAlertLevel: effectiveLevel,
+            href: `/admin/inventory/pet-packaging?open=${String(pet._id)}`,
+          });
+        }
+      }
+    } else {
+      const configuredLevel = pet.stockAlertLevel ?? 0;
+      const stock = pet.quantity ?? 0;
+      const effectiveLevel =
+        configuredLevel > 0 ? configuredLevel : stock <= 0 ? 1 : 0;
+      if (effectiveLevel > 0 && stock < effectiveLevel) {
+        alerts.push({
+          itemId: String(pet._id),
+          module: "pet-packaging",
+          customId: pet.customId,
+          name: pet.size,
+          quantity: stock,
+          stockAlertLevel: effectiveLevel,
+          href: `/admin/inventory/pet-packaging?open=${String(pet._id)}`,
+        });
+      }
     }
   }
 

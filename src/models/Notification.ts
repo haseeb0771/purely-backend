@@ -1,7 +1,12 @@
 import { Schema, model, models, Types } from "mongoose";
 import type { Model, Document } from "mongoose";
 
-export type NotificationType = "inquiry" | "activity" | "inventory";
+export type NotificationType =
+  | "inquiry"
+  | "activity"
+  | "inventory"
+  | "payment"
+  | "marketing";
 
 export interface NotificationFields {
   type: NotificationType;
@@ -23,7 +28,7 @@ const notificationSchema = new Schema<NotificationDoc>(
     type: {
       type: String,
       required: true,
-      enum: ["inquiry", "activity", "inventory"],
+      enum: ["inquiry", "activity", "inventory", "payment", "marketing"],
     },
     action: { type: String, required: true, trim: true },
     title: { type: String, required: true, trim: true },

@@ -3,7 +3,6 @@ import helmet from "helmet";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import path from "path";
-import { env } from "./config/env";
 import adminRoutes from "./routes/adminRoutes";
 import inventoryRoutes from "./routes/inventoryRoutes";
 import auditRoutes from "./routes/auditRoutes";
@@ -22,6 +21,8 @@ import mockupRoutes from "./routes/mockupRoutes";
 import dashboardRoutes from "./routes/dashboardRoutes";
 import stockAlertRoutes from "./routes/stockAlertRoutes";
 import inquiryRoutes from "./routes/inquiryRoutes";
+import inventoryOrderRoutes from "./routes/inventoryOrderRoutes";
+import marketingClientRoutes from "./routes/marketingClientRoutes";
 import { apiLimiter } from "./middleware/rateLimiter";
 import { errorHandler, notFound } from "./middleware/errorHandler";
 
@@ -81,6 +82,8 @@ app.use("/api/mockups", mockupRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/stock-alerts", stockAlertRoutes);
 app.use("/api/inquiries", inquiryRoutes);
+app.use("/api/inventory-orders", inventoryOrderRoutes);
+app.use("/api/marketing-clients", marketingClientRoutes);
 
 app.use(notFound);
 app.use(errorHandler);

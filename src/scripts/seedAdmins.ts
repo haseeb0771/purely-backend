@@ -13,17 +13,17 @@ interface SeedAdmin {
 const admins: SeedAdmin[] = [
   {
     name: "Haseeb",
-    email: "haseeb@purely.com",
+    email: "devhaseeb@purely.com",
     password: "1111111111",
   },
   {
     name: "Amish",
-    email: "amish@purely.com",
+    email: "devamish@purely.com",
     password: "1111111111",
   },
   {
     name: "Ali",
-    email: "ali@purely.com",
+    email: "devali@purely.com",
     password: "1111111111",
   },
 ];

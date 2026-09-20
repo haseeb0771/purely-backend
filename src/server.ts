@@ -5,6 +5,24 @@ import app from "./app";
 import { env } from "./config/env";
 import { connectDB } from "./config/db";
 import { initSockets } from "./sockets";
+import {
+  runPaymentReminderSweep,
+  shouldRunPaymentReminderSweep,
+} from "./services/paymentReminders";
+import {
+  runOverdueDeliverySweep,
+  shouldRunOverdueDeliverySweep,
+} from "./services/overdueDeliveries";
+import {
+  runMarketingReminderSweep,
+  shouldRunMarketingReminderSweep,
+} from "./services/marketingClientReminders";
+import {
+  runNextOrderSweep,
+  shouldRunNextOrderSweep,
+} from "./services/nextOrderReminders";
+
+const PAYMENT_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000; // every 6 hours
 
 const isDirectRun = require.main === module;
 
@@ -20,6 +38,34 @@ if (isDirectRun) {
       console.log(`[server] Environment: ${env.NODE_ENV}`);
       console.log(`[server] Allowed client origins: ${env.CLIENT_URL}, *.vercel.app`);
     });
+
+    if (shouldRunPaymentReminderSweep()) void runPaymentReminderSweep();
+    setInterval(() => {
+      if (shouldRunPaymentReminderSweep()) {
+        void runPaymentReminderSweep();
+      }
+    }, PAYMENT_SWEEP_INTERVAL_MS).unref();
+
+    if (shouldRunOverdueDeliverySweep()) void runOverdueDeliverySweep();
+    setInterval(() => {
+      if (shouldRunOverdueDeliverySweep()) {
+        void runOverdueDeliverySweep();
+      }
+    }, PAYMENT_SWEEP_INTERVAL_MS).unref();
+
+    if (shouldRunMarketingReminderSweep()) void runMarketingReminderSweep();
+    setInterval(() => {
+      if (shouldRunMarketingReminderSweep()) {
+        void runMarketingReminderSweep();
+      }
+    }, PAYMENT_SWEEP_INTERVAL_MS).unref();
+
+    if (shouldRunNextOrderSweep()) void runNextOrderSweep();
+    setInterval(() => {
+      if (shouldRunNextOrderSweep()) {
+        void runNextOrderSweep();
+      }
+    }, PAYMENT_SWEEP_INTERVAL_MS).unref();
 
     const shutdown = (signal: string): void => {
       console.log(`[server] ${signal} received, shutting down gracefully...`);

@@ -10,6 +10,7 @@
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
     "seed:admins": "ts-node src/scripts/seedAdmins.ts",
+    "backfill:unit-cost": "ts-node src/scripts/backfillUnitCostPrice.ts",
     "test": "vitest run"
   },
   "dependencies": {

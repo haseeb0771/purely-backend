@@ -4,6 +4,7 @@ import type { AuthRequest } from "../middleware/auth";
 import { emitInventoryNotification } from "../sockets";
 import { recordAudit } from "../services/audit";
 import { checkAndNotifyStockAlerts } from "../services/stockAlerts";
+import { perPieceCost, resolvePerPiece, weightedPerPiece } from "../utils/pricing";
 
 const CAP_ID_PATTERN = /^CAP-\d{3}$/;
 
@@ -142,6 +143,7 @@ export async function createCap(
     const totalQuantity = sanitizeNonNegative(req.body?.totalQuantity);
     const totalCostPrice = sanitizeNonNegative(req.body?.totalCostPrice);
     const stockAlertLevel = sanitizeNonNegative(req.body?.stockAlertLevel);
+    const unitCostPrice = perPieceCost(totalCostPrice, totalQuantity);
 
     if (!color) {
       res.status(400).json({ success: false, message: "Cap color is required." });
@@ -163,6 +165,7 @@ export async function createCap(
       imageUrl,
       totalQuantity,
       totalCostPrice,
+      unitCostPrice,
       stockAlertLevel,
       createdBy: req.admin._id,
       updatedByHistory: [
@@ -230,6 +233,7 @@ export async function updateCap(
       imageUrl?: string;
       totalQuantity?: number;
       totalCostPrice?: number;
+      unitCostPrice?: number;
       stockAlertLevel?: number;
     } = {};
     const changes = {
@@ -288,6 +292,16 @@ export async function updateCap(
         message: "No valid changes were provided.",
       });
       return;
+    }
+
+    if (
+      updates.totalQuantity !== undefined ||
+      updates.totalCostPrice !== undefined
+    ) {
+      updates.unitCostPrice = perPieceCost(
+        updates.totalCostPrice ?? existing.totalCostPrice,
+        updates.totalQuantity ?? existing.totalQuantity
+      );
     }
 
     const changesSummary = summarizeUpdate(changes, {
@@ -400,10 +414,21 @@ export async function addCapInventory(
 
     const nextQuantity = existing.totalQuantity + quantity;
     const nextCost = existing.totalCostPrice + totalCostPrice;
+    const nextUnitCostPrice = weightedPerPiece(
+      existing.totalQuantity,
+      resolvePerPiece(
+        existing.unitCostPrice,
+        existing.totalCostPrice,
+        existing.totalQuantity
+      ),
+      quantity,
+      totalCostPrice
+    );
 
     const updates: Record<string, unknown> = {
       totalQuantity: nextQuantity,
       totalCostPrice: nextCost,
+      unitCostPrice: nextUnitCostPrice,
       $push: {
         updatedByHistory: {
           adminId: req.admin._id,

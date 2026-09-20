@@ -8,7 +8,7 @@ import type { AuthRequest } from "../middleware/auth";
 import { recordAudit } from "../services/audit";
 import { emitInventoryNotification } from "../sockets";
 
-const VALID_STATUSES: readonly OrderStatus[] = ["PENDING", "PROCESSING", "COMPLETED", "CANCELLED"];
+const VALID_STATUSES: readonly OrderStatus[] = ["PENDING", "PROCESSING", "COMPLETED", "DELIVERED", "CANCELLED"];
 
 function randomOrderId(): string {
   return `ORD-${Math.floor(1000 + Math.random() * 9000)}`;
