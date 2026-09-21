@@ -39,19 +39,41 @@ app.use(
   })
 );
 
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      if (!origin || env.NODE_ENV !== "production") return callback(null, true);
-      const allowed = [...(env.CLIENT_URL || "").split(",").map((u) => u.trim().replace(/\/$/, "")), "https://purely-custom-labels.vercel.app"];
-      return callback(null, allowed.includes(origin));
-    },
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept"],
-  })
-);
-app.options("*", cors());
+// 1. Dynamic Allowed Origins Setup
+const configuredOrigins = (env.CLIENT_URL || "")
+  .split(",")
+  .map((u) => u.trim().replace(/\/$/, ""))
+  .filter(Boolean);
+
+const allowedOrigins = [
+  ...configuredOrigins,
+  "https://purely-custom-labels.vercel.app",
+  "http://localhost:3000",
+  "http://localhost:5173",
+];
+
+const corsOptions: cors.CorsOptions = {
+  origin: (origin, callback) => {
+    // Allow non-browser requests (e.g. Postman, server-to-server, mobile apps) or non-production environment
+    if (!origin || env.NODE_ENV !== "production") {
+      return callback(null, true);
+    }
+
+    const cleanOrigin = origin.replace(/\/$/, "");
+    if (allowedOrigins.includes(cleanOrigin) || cleanOrigin.endsWith(".vercel.app")) {
+      return callback(null, true);
+    }
+
+    return callback(new Error(`CORS Error: Origin ${origin} is not allowed.`));
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept"],
+  optionsSuccessStatus: 200,
+};
+
+// 2. Apply CORS globally (handles both normal requests and preflight OPTIONS automatically)
+app.use(cors(corsOptions));
 
 app.use(cookieParser());
 app.use(express.json({ limit: "10kb" }));
