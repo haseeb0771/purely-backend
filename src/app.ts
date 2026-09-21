@@ -25,6 +25,7 @@ import inventoryOrderRoutes from "./routes/inventoryOrderRoutes";
 import marketingClientRoutes from "./routes/marketingClientRoutes";
 import { apiLimiter } from "./middleware/rateLimiter";
 import { errorHandler, notFound } from "./middleware/errorHandler";
+import { env } from "./config/env";
 
 const app = express();
 
@@ -40,10 +41,14 @@ app.use(
 
 app.use(
   cors({
-    origin: true,
+    origin: (origin, callback) => {
+      if (!origin || env.NODE_ENV !== "production") return callback(null, true);
+      const allowed = [...(env.CLIENT_URL || "").split(",").map((u) => u.trim().replace(/\/$/, "")), "https://purely-custom-labels.vercel.app"];
+      return callback(null, allowed.includes(origin));
+    },
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept"],
   })
 );
 app.options("*", cors());
