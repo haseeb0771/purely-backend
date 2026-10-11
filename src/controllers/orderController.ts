@@ -2,7 +2,7 @@ import type { Response } from "express";
 import { Types } from "mongoose";
 import { randomInt } from "crypto";
 import { Order, LABEL_SELECTION_TYPES, ORDER_STATUSES } from "../models/Order";
-import type { LabelSelectionType, SellingPriceMode, SizeQuantity } from "../models/Order";
+import type { LabelSelectionType, OrderDoc, SellingPriceMode, SizeQuantity } from "../models/Order";
 import { BottleInventory, BOTTLE_SIZES } from "../models/BottleInventory";
 import type { BottleSize, BottleInventoryDoc } from "../models/BottleInventory";
 import { CapInventory } from "../models/CapInventory";
@@ -17,6 +17,7 @@ import { recordAudit } from "../services/audit";
 import { emitToAdmins, emitMarketingNotification } from "../sockets";
 import { checkAndNotifyStockAlerts } from "../services/stockAlerts";
 import { runPaymentReminderSweep, shouldRunPaymentReminderSweep } from "../services/paymentReminders";
+import { generateOrderInvoicePdf } from "../services/invoice";
 import {
   buildPricing,
   BOTTLES_PER_PET,
@@ -58,6 +59,23 @@ async function generateUniqueOrderId(): Promise<string> {
     if (!exists) return candidate;
   }
   throw new Error("Could not generate a unique order ID.");
+}
+
+/** Render the order's invoice PDF and persist it (best-effort). */
+async function generateAndStoreInvoice(orderDoc: OrderDoc): Promise<void> {
+  const buffer = await generateOrderInvoicePdf(orderDoc);
+  await Order.updateOne(
+    { _id: orderDoc._id },
+    {
+      $set: {
+        invoice: {
+          data: buffer,
+          contentType: "application/pdf",
+          generatedAt: new Date(),
+        },
+      },
+    }
+  );
 }
 
 function parseSizesQuery(raw: unknown): BottleSize[] {
@@ -451,6 +469,51 @@ export async function getOrder(req: AuthRequest, res: Response): Promise<void> {
     res.status(500).json({
       success: false,
       message: "Failed to load order.",
+    });
+  }
+}
+
+export async function getOrderInvoice(
+  req: AuthRequest,
+  res: Response
+): Promise<void> {
+  try {
+    const order = await Order.findById(req.params.id).select("+invoice");
+    if (!order) {
+      res.status(404).json({ success: false, message: "Order not found." });
+      return;
+    }
+
+    let invoice = order.invoice;
+    if (!invoice || !invoice.data || invoice.data.length === 0) {
+      // Backfill for legacy orders created before invoices were introduced.
+      try {
+        invoice = {
+          data: await generateOrderInvoicePdf(order),
+          contentType: "application/pdf",
+          generatedAt: new Date(),
+        };
+        await Order.updateOne({ _id: order._id }, { $set: { invoice } });
+      } catch (pdfErr) {
+        console.error("[orders] invoice regeneration failed:", pdfErr);
+        res.status(500).json({
+          success: false,
+          message: "Failed to generate invoice.",
+        });
+        return;
+      }
+    }
+
+    const filename = `Invoice-${order.orderId}.pdf`;
+    res.setHeader("Content-Type", invoice.contentType || "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="${filename}"`);
+    res.setHeader("Content-Length", String(invoice.data.length));
+    res.status(200).send(invoice.data);
+  } catch (error) {
+    console.error("[orders] get invoice failed:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to load invoice.",
     });
   }
 }
@@ -991,10 +1054,9 @@ export async function createOrder(
       });
 
       const petBySize: Record<string, { pet: PetPackagingDoc; quantity: number }> = {};
-      const pets = petDocs.map(({ pet, size, quantity }) => {
+      for (const { pet, size, quantity } of petDocs) {
         petBySize[size] = { pet, quantity };
-        return { pet, size, quantity };
-      });
+      }
 
       const pricing = buildPricing(
         {
@@ -1005,7 +1067,7 @@ export async function createOrder(
           petSellPerUnit: payload.petSellPerUnit,
           waterRate: payload.waterRate ?? undefined,
         },
-        { cap, label, petBySize, pets }
+        { cap, label, petBySize }
       );
       const { breakdown } = pricing;
       // When the client sent per-size sell prices, the order total is the sum
@@ -1134,6 +1196,14 @@ export async function createOrder(
       }
 
       const createdDoc = Array.isArray(created) ? created[0] : created;
+
+      // Render + persist the printable invoice so it is ready on first view.
+      // Best-effort: a PDF failure must never roll back an already-committed order.
+      try {
+        await generateAndStoreInvoice(createdDoc);
+      } catch (invoiceErr) {
+        console.error(`[orders] invoice generation failed for ${orderId}:`, invoiceErr);
+      }
 
       const populated = await Order.findById(createdDoc._id)
         .populate([...POPULATE])

@@ -107,6 +107,8 @@ export interface BottlePriceLine {
   capCostPerUnit: number;
   labelCostPerUnit: number;
   petPackCostPerUnit: number;
+  /** The PET-pack cost split across the bottles inside one pack. */
+  petCostPerBottle: number;
   waterCostPerBottle: number;
   costPerUnit: number;
   costPerBottle: number;
@@ -181,15 +183,6 @@ export interface PricingDeps {
       quantity: number;
     }
   >;
-  /** Every PET-packaging selection consumed by the order (costed exactly once). */
-  pets: {
-    pet: Pick<
-      PetPackagingDoc,
-      "_id" | "size" | "totalCostPrice" | "quantity" | "unitCostPrice" | "sizeDetails"
-    >;
-    size: string;
-    quantity: number;
-  }[];
 }
 
 /**
@@ -256,6 +249,13 @@ export function buildPricing(
       (LITERS_PER_SIZE[item.size] ?? 0) * waterRate,
     );
 
+    // PET packaging is split across the bottles it wraps (one 500ml pack = 12
+    // bottles, one 1500ml pack = 6 bottles, etc.) and folded into the bottle's
+    // base cost, exactly like caps and labels. Applied only when the order
+    // actually uses the packs on that bottle line.
+    const petCostPerBottle =
+      item.petCount > 0 ? round2(petUnitCost / bottlesPerPET) : 0;
+
     const bottleCostAmount = round2(item.bottleCostPerUnit * item.bottleCount);
     const capCostAmount = round2(capUnitCost * item.bottleCount);
     const labelCostAmount = round2(labelCostPerUnit * labelQty);
@@ -263,14 +263,10 @@ export function buildPricing(
     const waterCostAmount = round2(waterCostPerBottle * item.bottleCount);
 
     const costPerUnit = round2(
-      item.bottleCostPerUnit + capUnitCost + labelCostPerUnit,
+      item.bottleCostPerUnit + capUnitCost + labelCostPerUnit + petCostPerBottle,
     );
     const costPerBottle = round2(costPerUnit + waterCostPerBottle);
-    const costPerPET = round2(
-      item.petCount > 0
-        ? costPerBottle * bottlesPerPET + petUnitCost
-        : costPerBottle * bottlesPerPET,
-    );
+    const costPerPET = round2(costPerBottle * bottlesPerPET);
     const costAmount = round2(
       bottleCostAmount + capCostAmount + labelCostAmount + petPackCostAmount + waterCostAmount,
     );
@@ -297,6 +293,7 @@ export function buildPricing(
       capCostPerUnit: round2(capUnitCost),
       labelCostPerUnit: round2(labelCostPerUnit),
       petPackCostPerUnit: round2(petUnitCost),
+      petCostPerBottle,
       waterCostPerBottle,
       costPerUnit,
       costPerBottle,
@@ -311,21 +308,6 @@ export function buildPricing(
       costAmount,
       sellAmount,
     });
-
-    if (packEntry) {
-      const sellPerUnitPet = round2(
-        input.petSellPerUnit?.[String(packEntry.pet._id)] ?? petUnitCost,
-      );
-      petLines.push({
-        petPackagingId: String(packEntry.pet._id),
-        size: item.size,
-        quantity: item.petCount,
-        costPerUnit: round2(petUnitCost),
-        sellPerUnit: sellPerUnitPet,
-        costAmount: petPackCostAmount,
-        sellAmount: round2(sellPerUnitPet * item.petCount),
-      });
-    }
   }
 
   const liters = round2(
@@ -336,30 +318,6 @@ export function buildPricing(
   );
   const waterAmount = computeWaterCost(liters, waterRate);
 
-  // Cost every PET-packaging selection exactly once (bottle-size packs are
-  // already accounted for above, so only sizes without a bottle line or extra
-  // same-size selections are appended). Keeps legacy orders backward compatible.
-  const coveredSizes = new Set(input.sizes.map((item) => item.size));
-  const seenPets = new Set(petLines.map((l) => `${l.petPackagingId}::${l.size}`));
-  for (const { pet, size, quantity } of deps.pets) {
-    if (seenPets.has(`${String(pet._id)}::${size}`)) continue;
-    const unitCost = petPerPiece(pet, size);
-    const costAmount = round2(unitCost * quantity);
-    const sellPerUnitPet = round2(
-      input.petSellPerUnit?.[String(pet._id)] ?? unitCost,
-    );
-    petLines.push({
-      petPackagingId: String(pet._id),
-      size,
-      quantity,
-      costPerUnit: round2(unitCost),
-      sellPerUnit: sellPerUnitPet,
-      costAmount,
-      sellAmount: round2(sellPerUnitPet * quantity),
-    });
-    void coveredSizes;
-  }
-
   const bottles = round2(
     bottleLines.reduce((sum, l) => sum + l.bottleCostAmount, 0),
   );
@@ -367,12 +325,12 @@ export function buildPricing(
   const labels = round2(
     bottleLines.reduce((sum, l) => sum + l.labelCostAmount, 0),
   );
-  // PET packaging is costed exactly once across all selections (petLines).
-  const pet = round2(petLines.reduce((sum, l) => sum + l.costAmount, 0));
+  // PET packaging is split into each bottle line's base cost (never a
+  // separate bill line).
+  const pet = round2(bottleLines.reduce((sum, l) => sum + l.petPackCostAmount, 0));
   const totalCost = round2(bottles + caps + labels + pet + waterAmount);
   const totalSell = round2(
-    bottleLines.reduce((sum, l) => sum + l.sellAmount, 0) +
-      petLines.reduce((sum, l) => sum + l.sellAmount, 0),
+    bottleLines.reduce((sum, l) => sum + l.sellAmount, 0),
   );
 
   return {

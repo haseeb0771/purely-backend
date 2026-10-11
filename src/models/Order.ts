@@ -85,6 +85,12 @@ export interface PaymentEntry {
   recordedByName?: string;
 }
 
+export interface OrderInvoice {
+  data: Buffer;
+  contentType: string;
+  generatedAt: Date;
+}
+
 export interface OrderFields {
   orderId: string;
   clientDetails: ClientDetails;
@@ -113,6 +119,7 @@ export interface OrderFields {
 }
 
 export interface OrderDoc extends OrderFields, Document {
+  invoice?: OrderInvoice | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -307,6 +314,7 @@ const bottlePriceLineSchema = new Schema(
     capCostPerUnit: { type: Number, default: 0 },
     labelCostPerUnit: { type: Number, default: 0 },
     petPackCostPerUnit: { type: Number, default: 0 },
+    petCostPerBottle: { type: Number, default: 0 },
     waterCostPerBottle: { type: Number, default: 0 },
     costPerUnit: { type: Number, default: 0 },
     costPerBottle: { type: Number, default: 0 },
@@ -525,6 +533,18 @@ const orderSchema = new Schema<OrderDoc>(
     lastReminderAt: {
       type: Date,
       default: null,
+    },
+    invoice: {
+      type: new Schema(
+        {
+          data: { type: Buffer },
+          contentType: { type: String, default: "application/pdf" },
+          generatedAt: { type: Date, default: Date.now },
+        },
+        { _id: false }
+      ),
+      default: null,
+      select: false,
     },
   },
   { timestamps: true }

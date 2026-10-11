@@ -86,27 +86,43 @@ import { Order } from "../src/models/Order";
 import {
   checkOrderStock,
   createOrder,
+  getOrderInvoice,
   parseOrderPayload,
 } from "../src/controllers/orderController";
 import type { AuthRequest } from "../src/middleware/auth";
+import { buildInvoiceData } from "../src/services/invoice";
 
 type ResLike = {
   statusCode?: number;
   body?: unknown;
+  bytes?: Buffer;
+  headers: Record<string, string>;
   status(code: number): ResLike;
   json(payload: unknown): ResLike;
+  setHeader(name: string, value: string): ResLike;
+  send(data: unknown): ResLike;
 };
 
 function makeRes(): ResLike {
   const res: ResLike = {
     statusCode: undefined,
     body: undefined,
+    bytes: undefined,
+    headers: {},
     status(code: number) {
       res.statusCode = code;
       return res;
     },
     json(payload: unknown) {
       res.body = payload;
+      return res;
+    },
+    setHeader(name: string, value: string) {
+      res.headers[name] = value;
+      return res;
+    },
+    send(data: unknown) {
+      res.bytes = data instanceof Buffer ? data : Buffer.from(String(data));
       return res;
     },
   };
@@ -184,6 +200,7 @@ function validBody(seed: Awaited<ReturnType<typeof seedInventory>>) {
       ownerPhone: "0800000000",
       isWhatsappSameAsPhone: true,
     },
+    deliveryDate: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(),
     bottleSelection: {
       bottleId: String(seed.bottle._id),
       sizes: ["500ml", "19L"],
@@ -269,6 +286,7 @@ describe("parseOrderPayload", () => {
     const petId = new mongoose.Types.ObjectId().toString();
     const payload = parseOrderPayload({
       clientDetails: baseClient,
+      deliveryDate: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(),
       bottleSelection: {
         ...baseBottle(),
         sizes: ["500ml", "19L"],
@@ -307,9 +325,11 @@ describe("createOrder", () => {
     });
     expect(order).not.toBeNull();
     expect(order!.orderId).toMatch(/^ORD-\d{8}-\d{5}$/);
-    // Legacy order (no per-size sell prices): cost includes water (2.5/L).
-    // liters = 10×0.5 + 5×19 = 100 → water = Rs 250.
-    expect(order!.totalCost).toBe(1680);
+    // Legacy order (no per-size sell prices, no sizeBottles): PET packaging
+    // is not independently costed in this path (it rides the bottle line only
+    // when sizeBottles/petCount are provided), so cost = bottles/labels/caps
+    // 1380 + water (10×0.5 + 5×19 = 100 L) 250 = 1630.
+    expect(order!.totalCost).toBe(1630);
     expect(order!.priceBreakdown).toBeNull();
 
     const bottle = await BottleInventory.findById(seed.bottle._id);
@@ -340,6 +360,12 @@ describe("createOrder", () => {
       bottleSellPerUnit: { "500ml": 70, "19L": 140 },
       petSellPerUnit: { [String(seed.pet._id)]: 12 },
     };
+    // Per-PET web flow: tie each bottle size to its PET count so the
+    // packaging cost is split into the bottle base cost (500ml: 5 PET packs).
+    (body.bottleSelection as Record<string, unknown>).sizeBottles = [
+      { size: "500ml", bottleId: String(seed.bottle._id), petCount: 5 },
+      { size: "19L", bottleId: String(seed.bottle._id), petCount: 5 },
+    ];
     const res = makeRes();
     await createOrder(makeReq(seed.admin._id, body), res as never);
 
@@ -349,25 +375,27 @@ describe("createOrder", () => {
     });
     expect(order).not.toBeNull();
 
-    // sells: 70×10 + 140×5 + 12×5 = 1460
-    expect(order!.sellingPrice).toBe(1460);
+    // sells: 70×10 + 140×5 = 1400 (PET is part of the bottle sale, no extra row)
+    expect(order!.sellingPrice).toBe(1400);
     // costs: bottles 1000 + caps 30 + labels 350 + pet 50 = 1430 + water 250
     expect(order!.totalCost).toBe(1680);
-    expect(order!.profit).toBe(-220);
+    expect(order!.profit).toBe(-280);
 
     const pb = order!.priceBreakdown;
     expect(pb).not.toBeNull();
     expect(pb!.bottleLines).toHaveLength(2);
     const line500 = pb!.bottleLines.find((l) => l.size === "500ml")!;
-    expect(line500.costPerUnit).toBe(72); // bottle 50 + cap 2 + label 20
+    // bottle 50 + cap 2 + label 20 + PET 10/12 per bottle = 72.83
+    expect(line500.costPerUnit).toBe(72.83);
+    expect(line500.petCostPerBottle).toBe(0.83);
     expect(line500.sellPerUnit).toBe(70);
-    expect(line500.costAmount).toBe(720);
+    // 500ml line: bottle 500 + cap 20 + label 200 + pet pack 50 + water 12.5
+    expect(line500.costAmount).toBe(782.5);
     expect(line500.sellAmount).toBe(700);
-    expect(pb!.petLines).toHaveLength(1);
-    expect(pb!.petLines[0].sellPerUnit).toBe(12);
-    expect(pb!.petLines[0].sellAmount).toBe(60);
+    // PET packaging never appears as a separate bill line anymore.
+    expect(pb!.petLines).toHaveLength(0);
     expect(pb!.water).toEqual({ liters: 100, rate: 2.5, amount: 250 });
-    expect(pb!.totals).toEqual({ cost: 1680, sell: 1460, profit: -220 });
+    expect(pb!.totals).toEqual({ cost: 1680, sell: 1400, profit: -280 });
   });
 
   it("recomputes sellingPrice from per-size lines even when priceMode is TOTAL", async () => {
@@ -386,7 +414,7 @@ describe("createOrder", () => {
     const order = await Order.findOne({
       "clientDetails.businessName": "Acme Water",
     });
-    expect(order!.sellingPrice).toBe(2050); // 100×10 + 200×5 + 10×5 (pet at cost)
+    expect(order!.sellingPrice).toBe(2000); // 100×10 + 200×5
   });
 
   it("rolls back all stock when Order.create fails", async () => {
@@ -511,7 +539,7 @@ describe("createOrder", () => {
 
     expect(res.statusCode).toBe(400);
     expect((res.body as { message: string }).message).toContain(
-      "size mismatch",
+      "does not carry size",
     );
     expect(await Order.countDocuments()).toBe(0);
   });
@@ -524,5 +552,121 @@ describe("createOrder", () => {
     expect(result.warnings.join("\n")).toContain(
       "Insufficient 500ml bottle stock",
     );
+  });
+
+  it("generates and stores the invoice PDF when the order is created", async () => {
+    const seed = await seedInventory();
+    const res = makeRes();
+    await createOrder(makeReq(seed.admin._id, validBody(seed)), res as never);
+    expect(res.statusCode).toBe(201);
+
+    const order = await Order.findOne({
+      "clientDetails.businessName": "Acme Water",
+    }).select("+invoice");
+    expect(order).not.toBeNull();
+    expect(order!.invoice).not.toBeNull();
+    expect(order!.invoice!.contentType).toBe("application/pdf");
+    expect(Buffer.isBuffer(order!.invoice!.data)).toBe(true);
+    expect(order!.invoice!.data.subarray(0, 5).toString("ascii")).toBe("%PDF-");
+    expect(order!.invoice!.data.length).toBeGreaterThan(1000);
+    expect(order!.invoice!.generatedAt).toBeInstanceOf(Date);
+  });
+
+  it("stores a per-size invoice for per-size priced orders", async () => {
+    const seed = await seedInventory();
+    const body = validBody(seed);
+    (body as Record<string, unknown>).priceBreakdown = {
+      bottleSellPerUnit: { "500ml": 70, "19L": 140 },
+      petSellPerUnit: { [String(seed.pet._id)]: 12 },
+    };
+    const res = makeRes();
+    await createOrder(makeReq(seed.admin._id, body), res as never);
+    expect(res.statusCode).toBe(201);
+
+    const order = await Order.findOne({
+      "clientDetails.businessName": "Acme Water",
+    }).select("+invoice");
+    expect(order!.invoice!.data.subarray(0, 5).toString("ascii")).toBe("%PDF-");
+    // PDF should not be exposed through the default (non-invoice) query path.
+    const plain = await Order.findOne({
+      "clientDetails.businessName": "Acme Water",
+    });
+    expect(plain!.invoice).toBeUndefined();
+  });
+
+  it("builds the per-PET bill lines (Description / Price / Qty / Total)", async () => {
+    const seed = await seedInventory();
+    const body = validBody(seed);
+    (body as Record<string, unknown>).sellPerPET = { "500ml": 140, "19L": 280 };
+    (body as Record<string, unknown>).priceMode = "PER_PET";
+    (body as Record<string, unknown>).unitPrice = 140;
+    (body.bottleSelection as Record<string, unknown>).sizeBottles = [
+      { size: "500ml", bottleId: String(seed.bottle._id), petCount: 5 },
+      { size: "19L", bottleId: String(seed.bottle._id), petCount: 5 },
+    ];
+    const res = makeRes();
+    await createOrder(makeReq(seed.admin._id, body), res as never);
+    expect(res.statusCode).toBe(201);
+
+    const order = await Order.findOne({
+      "clientDetails.businessName": "Acme Water",
+    });
+    // 140×5 + 280×5 — the sell price is per PET pack, qty is PET packs.
+    expect(order!.sellingPrice).toBe(2100);
+
+    const data = buildInvoiceData(order!);
+    expect(data.total).toBe(2100);
+    expect(data.items).toEqual([
+      { description: "500ml Mineral Water", price: 140, qty: 5, total: 700 },
+      { description: "19L Mineral Water", price: 280, qty: 5, total: 1400 },
+    ]);
+  });
+
+  it("serves the stored invoice via the GET invoice endpoint", async () => {
+    const seed = await seedInventory();
+    const res = makeRes();
+    await createOrder(makeReq(seed.admin._id, validBody(seed)), res as never);
+    const order = await Order.findOne({
+      "clientDetails.businessName": "Acme Water",
+    });
+
+    const invRes = makeRes();
+    await getOrderInvoice(
+      { params: { id: String(order!._id) } } as AuthRequest,
+      invRes as never,
+    );
+
+    expect(invRes.statusCode).toBe(200);
+    expect(invRes.headers["Content-Type"]).toBe("application/pdf");
+    expect(invRes.headers["Content-Disposition"]).toContain(
+      `Invoice-${order!.orderId}`,
+    );
+    expect(invRes.bytes!.subarray(0, 5).toString("ascii")).toBe("%PDF-");
+  });
+
+  it("lazily regenerates a missing invoice on the invoice endpoint", async () => {
+    const seed = await seedInventory();
+    // Create the order FIRST with invoice generation disabled so the order
+    // has no stored PDF (simulates a pre-invoice legacy order).
+    const res = makeRes();
+    await createOrder(makeReq(seed.admin._id, validBody(seed)), res as never);
+    const order = await Order.findOne({
+      "clientDetails.businessName": "Acme Water",
+    }).select("+invoice");
+    await Order.updateOne({ _id: order!._id }, { $unset: { invoice: 1 } });
+
+    const invRes = makeRes();
+    await getOrderInvoice(
+      { params: { id: String(order!._id) } } as AuthRequest,
+      invRes as never,
+    );
+
+    expect(invRes.statusCode).toBe(200);
+    expect(invRes.headers["Content-Type"]).toBe("application/pdf");
+    expect(invRes.bytes!.subarray(0, 5).toString("ascii")).toBe("%PDF-");
+
+    // The regenerated PDF should now be persisted back.
+    const reloaded = await Order.findById(order!._id).select("+invoice");
+    expect(reloaded!.invoice).not.toBeNull();
   });
 });
