@@ -83,12 +83,18 @@ import { LabelInventory } from "../src/models/LabelInventory";
 import { PetPackagingInventory } from "../src/models/PetPackagingInventory";
 import { Admin } from "../src/models/Admin";
 import { Order } from "../src/models/Order";
+import { DesignerCost } from "../src/models/DesignerCost";
 import {
   checkOrderStock,
   createOrder,
   getOrderInvoice,
   parseOrderPayload,
 } from "../src/controllers/orderController";
+import { createLabel } from "../src/controllers/labelController";
+import {
+  listDesignerCosts,
+  updateDesignerCostStatus,
+} from "../src/controllers/designerCostController";
 import type { AuthRequest } from "../src/middleware/auth";
 import { buildInvoiceData } from "../src/services/invoice";
 
@@ -668,5 +674,117 @@ describe("createOrder", () => {
     // The regenerated PDF should now be persisted back.
     const reloaded = await Order.findById(order!._id).select("+invoice");
     expect(reloaded!.invoice).not.toBeNull();
+  });
+});
+
+describe("designer costs", () => {
+  it("records Rs. 500 per size for a new label and lists it for the month", async () => {
+    const admin = await Admin.create({
+      name: "Test Admin",
+      email: "admin@test.local",
+      password: "super-secret-password",
+      role: "ADMIN",
+    });
+
+    const createRes = makeRes();
+    await createLabel(
+      makeReq(admin._id, {
+        name: "Two Size Label",
+        imageUrl: "https://example.com/label.png",
+        sizeDetails: [
+          { size: "500ml", quantity: 10, totalCostPrice: 100, stockAlertLevel: 0 },
+          { size: "1500ml", quantity: 5, totalCostPrice: 50, stockAlertLevel: 0 },
+        ],
+      }),
+      createRes as never
+    );
+
+    expect(createRes.statusCode).toBe(201);
+
+    const cost = await DesignerCost.findOne({});
+    expect(cost).not.toBeNull();
+    expect(cost!.sizeCount).toBe(2);
+    expect(cost!.amount).toBe(1000);
+    expect(cost!.status).toBe("UNPAID");
+
+    const listRes = makeRes();
+    await listDesignerCosts(
+      {
+        query: {},
+        admin: { _id: admin._id, name: admin.name },
+        headers: {},
+        cookies: {},
+      } as unknown as AuthRequest,
+      listRes as never
+    );
+
+    expect(listRes.statusCode).toBe(200);
+    const body = listRes.body as {
+      data: {
+        summary: { totalAmount: number; unpaidAmount: number };
+        records: Array<{ labelName: string; amount: number }>;
+      };
+    };
+    expect(body.data.summary.totalAmount).toBe(1000);
+    expect(body.data.summary.unpaidAmount).toBe(1000);
+    expect(body.data.records).toHaveLength(1);
+    expect(body.data.records[0].labelName).toBe("Two Size Label");
+  });
+
+  it("marks a designer cost as paid and back again", async () => {
+    const admin = await Admin.create({
+      name: "Test Admin",
+      email: "admin@test.local",
+      password: "super-secret-password",
+      role: "ADMIN",
+    });
+
+    const cost = await DesignerCost.create({
+      labelId: new mongoose.Types.ObjectId(),
+      labelCustomId: "LBL-777",
+      labelName: "Designer Label",
+      sizes: ["500ml"],
+      sizeCount: 1,
+      ratePerSize: 500,
+      amount: 500,
+      status: "UNPAID",
+      month: "2026-11",
+      labelCreatedAt: new Date("2026-11-05T10:00:00.000Z"),
+      createdBy: admin._id,
+    });
+
+    const paidRes = makeRes();
+    await updateDesignerCostStatus(
+      {
+        params: { id: String(cost._id) },
+        body: { status: "PAID" },
+        admin: { _id: admin._id, name: admin.name },
+        headers: {},
+        cookies: {},
+      } as unknown as AuthRequest,
+      paidRes as never
+    );
+
+    expect(paidRes.statusCode).toBe(200);
+    const reloaded = await DesignerCost.findById(cost._id);
+    expect(reloaded!.status).toBe("PAID");
+    expect(reloaded!.paidAt).not.toBeNull();
+
+    const unpaidRes = makeRes();
+    await updateDesignerCostStatus(
+      {
+        params: { id: String(cost._id) },
+        body: { status: "UNPAID" },
+        admin: { _id: admin._id, name: admin.name },
+        headers: {},
+        cookies: {},
+      } as unknown as AuthRequest,
+      unpaidRes as never
+    );
+
+    expect(unpaidRes.statusCode).toBe(200);
+    const reloadedAgain = await DesignerCost.findById(cost._id);
+    expect(reloadedAgain!.status).toBe("UNPAID");
+    expect(reloadedAgain!.paidAt).toBeNull();
   });
 });

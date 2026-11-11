@@ -109,6 +109,8 @@ export interface OrderFields {
   unitPrice: number;
   totalCost: number;
   profit: number;
+  /** Delivery-time loader/transport cost, deducted from profit. */
+  loaderTransportExpense?: number;
   priceBreakdown?: PriceBreakdownData;
   stockWarnings?: string[];
   paymentStatus: PaymentStatus;
@@ -499,6 +501,11 @@ const orderSchema = new Schema<OrderDoc>(
     profit: {
       type: Number,
       default: 0,
+    },
+    loaderTransportExpense: {
+      type: Number,
+      default: 0,
+      min: [0, "Loader transport expense cannot be negative."],
     },
     priceBreakdown: {
       type: priceBreakdownSchema,

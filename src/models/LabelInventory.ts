@@ -24,6 +24,8 @@ export interface LabelInventoryFields {
   name: string;
   imageUrl: string;
   sizeDetails: LabelSizeDetail[];
+  /** When false, this label's stock alerts are suppressed everywhere. */
+  stockAlertsEnabled: boolean;
   createdBy: Types.ObjectId;
   updatedByHistory: LabelUpdatedByEntry[];
 }
@@ -129,6 +131,10 @@ const labelInventorySchema = new Schema<LabelInventoryDoc>(
       type: String,
       trim: true,
       maxlength: [500, "Image URL cannot exceed 500 characters."],
+    },
+    stockAlertsEnabled: {
+      type: Boolean,
+      default: true,
     },
     sizeDetails: {
       type: [sizeDetailSchema],

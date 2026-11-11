@@ -5,6 +5,7 @@ import type { AuthRequest } from "../middleware/auth";
 import { recordAudit } from "../services/audit";
 import { emitInventoryNotification } from "../sockets";
 import { checkAndNotifyStockAlerts } from "../services/stockAlerts";
+import { ensureDesignerCostForLabel } from "../services/designerCost";
 import { resolvePerPiece, weightedPerPiece } from "../utils/pricing";
 
 interface SanitizedLabelSizeDetail {
@@ -176,6 +177,7 @@ export async function createLabel(
       name,
       imageUrl: req.body?.imageUrl || "",
       sizeDetails,
+      stockAlertsEnabled: req.body?.stockAlertsEnabled !== false,
       createdBy: req.admin._id,
       updatedByHistory: [
         {
@@ -198,6 +200,25 @@ export async function createLabel(
         sizeDetails: label.sizeDetails,
       },
     });
+
+    // One-off design charge: Rs. 500 per distinct label size. Failure here
+    // must not fail label creation; the designer-cost page backfills missing
+    // records when the month is opened.
+    try {
+      await ensureDesignerCostForLabel({
+        _id: label._id,
+        customId: label.customId,
+        name: label.name,
+        sizeDetails: label.sizeDetails,
+        createdAt: label.createdAt,
+        createdBy: label.createdBy,
+      });
+    } catch (designerCostError) {
+      console.error(
+        "[labels] failed to record designer cost:",
+        designerCostError
+      );
+    }
 
     const populated = await LabelInventory.findById(label._id)
       .populate("createdBy", "name email")
@@ -253,6 +274,9 @@ export async function updateLabel(
     const updates: Record<string, unknown> = {
       name,
       sizeDetails,
+      ...(typeof req.body?.stockAlertsEnabled === "boolean"
+        ? { stockAlertsEnabled: req.body.stockAlertsEnabled }
+        : {}),
       $push: {
         updatedByHistory: {
           adminId: req.admin._id,

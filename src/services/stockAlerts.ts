@@ -74,6 +74,8 @@ export async function collectStockAlerts(): Promise<StockAlertItem[]> {
   }
 
   for (const label of labels) {
+    // Labels can opt out of stock alerts individually (default: enabled).
+    if (label.stockAlertsEnabled === false) continue;
     for (const sd of label.sizeDetails ?? []) {
       const configuredLevel = sd.stockAlertLevel ?? 0;
       const stock = sd.quantity || 0;

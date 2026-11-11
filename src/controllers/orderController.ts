@@ -1157,6 +1157,7 @@ export async function createOrder(
         unitPrice: payload.unitPrice,
         totalCost,
         profit,
+        loaderTransportExpense: 0,
         priceBreakdown: hasPerSizeSell ? breakdown : null,
         stockWarnings: warnings,
         paymentStatus,
@@ -1446,6 +1447,18 @@ export async function updateOrder(
       updates.clientDetails = next;
     }
 
+    let loaderTransportExpenseChanged = false;
+    if (body.loaderTransportExpense !== undefined) {
+      const raw = Number(body.loaderTransportExpense);
+      if (!Number.isFinite(raw) || raw < 0) {
+        throw new ValidationError(
+          "Loader transport expense must be a non-negative number."
+        );
+      }
+      updates.loaderTransportExpense = round2(raw);
+      loaderTransportExpenseChanged = true;
+    }
+
     let paymentData: { amount: number; method?: string; note?: string } | null =
       null;
 
@@ -1490,6 +1503,16 @@ export async function updateOrder(
     }
 
     Object.assign(order, updates);
+
+    // Loader/transport cost is an order-level delivery expense, so it reduces
+    // the order's net profit (it is not part of the inventory cost).
+    if (loaderTransportExpenseChanged) {
+      order.profit = round2(
+        (order.sellingPrice ?? 0) -
+          (order.totalCost ?? 0) -
+          (order.loaderTransportExpense ?? 0)
+      );
+    }
 
     if (paymentData) {
       order.totalPaid = round2(
@@ -1548,6 +1571,8 @@ export async function updateOrder(
         deliveryDate: updates.deliveryDate ?? order.deliveryDate ?? null,
         totalPaid: round2(order.totalPaid ?? 0),
         paymentStatus: order.paymentStatus,
+        loaderTransportExpense: round2(order.loaderTransportExpense ?? 0),
+        profit: round2(order.profit ?? 0),
       },
     });
 
